@@ -1,5 +1,5 @@
 import axios from 'axios';
-import puppeteer from 'puppeteer';
+import * as cheerio from 'cheerio';
 import { bot, group_id } from '../lib/bot';
 import { getAssetPath, randomInt } from '../util/functions';
 
@@ -64,101 +64,43 @@ function enviarMensagemAutomatica () {
 }
 
 // ==========================================
-// 2. EXTRAÇÃO COM NAVEGADOR REAL (PUPPETEER)
+// 2. EXTRAÇÃO ROBUSTA DE DADOS DA SHOPEE E ML
 // ==========================================
 
 const sessoesUsuario: { [key: number]: any } = {};
 
-async function extrairComPuppeteer(url: string) {
-    let browser = null;
+// Função para seguir redirecionamentos e expandir o link final de afiliado
+async function expandirUrl(urlOriginal: string): Promise<{ urlFinal: string, html: string, responseUrl: string }> {
     try {
-        browser = await puppeteer.launch({
-            headless: true,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--disable-gpu'
-            ]
+        const res = await axios.get(urlOriginal, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'pt-BR,pt;q=0.9'
+            },
+            maxRedirects: 10,
+            timeout: 12000
         });
 
-        const page = await browser.newPage();
-        
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        await page.setViewport({ width: 1280, height: 800 });
-
-        // Navega até o link e aguarda a renderização completa dos componentes
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-
-        // Extrai as informações diretamente do DOM rendered do navegador
-        const dados = await page.evaluate(() => {
-            // 1. Título / Nome
-            let nome = document.querySelector('meta[property="og:title"]')?.getAttribute('content') ||
-                       document.querySelector('h1')?.textContent ||
-                       document.title || 'Produto em Oferta';
-
-            nome = nome.replace(/- Mercado Livre.*/i, '')
-                       .replace(/\| Shopee Brasil.*/i, '')
-                       .replace(/Compre.*na Shopee.*/i, '')
-                       .trim();
-
-            // 2. Imagem
-            const imagem = document.querySelector('meta[property="og:image"]')?.getAttribute('content') ||
-                           document.querySelector('meta[name="twitter:image"]')?.getAttribute('content') || '';
-
-            // 3. Preço Atual e Preço Anterior
-            let precoAtual = '';
-            let precoAnterior = '';
-
-            // Estratégia Shopee
-            const shopeePriceEl = document.querySelector('.pq8P23, ._179A9X, .f9q4iZ');
-            if (shopeePriceEl) {
-                precoAtual = shopeePriceEl.textContent?.replace('R$', '').trim() || '';
-            }
-
-            // Estratégia Mercado Livre
-            if (!precoAtual) {
-                const mlPriceFrac = document.querySelector('.ui-pdp-price__second-line .andes-money-amount__fraction')?.textContent;
-                const mlPriceCents = document.querySelector('.ui-pdp-price__second-line .andes-money-amount__cents')?.textContent;
-                if (mlPriceFrac) {
-                    precoAtual = mlPriceCents ? `${mlPriceFrac},${mlPriceCents}` : mlPriceFrac;
-                }
-            }
-
-            // Estratégia Meta Tag Generica
-            if (!precoAtual) {
-                const metaPrice = document.querySelector('meta[property="product:price:amount"]')?.getAttribute('content') ||
-                                  document.querySelector('meta[property="og:price:amount"]')?.getAttribute('content');
-                if (metaPrice) {
-                    const match = metaPrice.match(/[\d.,]+/);
-                    if (match) precoAtual = match[0].replace('.', ',');
-                }
-            }
-
-            return { nome, imagem, precoAtual, precoAnterior };
-        });
-
-        await browser.close();
-        return dados;
-
-    } catch (err) {
-        console.error('Erro no Puppeteer:', err);
-        if (browser) await browser.close();
-        return null;
+        const urlFinal = res.request?.res?.responseUrl || res.config?.url || urlOriginal;
+        return { urlFinal, html: res.data || '', responseUrl: urlFinal };
+    } catch (e: any) {
+        const urlFinal = e.response?.request?.res?.responseUrl || urlOriginal;
+        return { urlFinal, html: e.response?.data || '', responseUrl: urlFinal };
     }
 }
 
 async function extrairDadosProduto(urlOriginal: string, precoManual?: string) {
     try {
-        // A. Mercado Livre (Tentativa rápida via API pública)
-        const mlMatch = urlOriginal.match(/MLB-?(\d+)/i);
+        // 1. Expande o link curto de afiliado para pegar o HTML e a URL final
+        const { urlFinal, html } = await expandirUrl(urlOriginal);
+
+        // --- CAMADA A: MERCADO LIVRE (API OFICIAL) ---
+        const mlMatch = urlFinal.match(/MLB-?(\d+)/i) || urlOriginal.match(/MLB-?(\d+)/i);
         if (mlMatch) {
             const itemId = `MLB${mlMatch[1]}`;
             try {
-                const apiRes = await axios.get(`https://api.mercadolibre.com/items/${itemId}`, { timeout: 6000 });
+                const apiRes = await axios.get(`https://api.mercadolibre.com/items/${itemId}`, { timeout: 8000 });
                 if (apiRes.data) {
                     const item = apiRes.data;
                     const precoNum = precoManual ? parseFloat(precoManual.replace(',', '.')) : item.price;
@@ -186,33 +128,109 @@ async function extrairDadosProduto(urlOriginal: string, precoManual?: string) {
                     };
                 }
             } catch (err) {
-                console.warn('API ML falhou, acionando Puppeteer...');
+                console.warn('Falha na API do ML, avançando para fallback...');
             }
         }
 
-        // B. Leitura completa via Puppeteer (Abrindo a página como navegador real)
-        const dadosPuppeteer = await extrairComPuppeteer(urlOriginal);
+        // --- CAMADA B: SHOPEE API INTERNA (BUSCA POR ITEMID E SHOPID) ---
+        const shopeeIds = urlFinal.match(/i\.(\d+)\.(\d+)/) || urlFinal.match(/\/product\/(\d+)\/(\d+)/);
+        if (shopeeIds) {
+            const shopid = shopeeIds[1];
+            const itemid = shopeeIds[2];
+            try {
+                const apiShopee = await axios.get(`https://shopee.com.br/api/v4/item/get?itemid=${itemid}&shopid=${shopid}`, {
+                    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+                    timeout: 8000
+                });
 
-        let precoFinal = precoManual || dadosPuppeteer?.precoAtual || 'Consultar no site';
-        let precoAnteriorFinal = 'Consultar no site';
+                if (apiShopee.data && apiShopee.data.data) {
+                    const item = apiShopee.data.data;
+                    const numPreco = precoManual ? parseFloat(precoManual.replace(',', '.')) : (item.price / 100000);
+                    const precoAtual = !isNaN(numPreco) ? numPreco.toFixed(2).replace('.', ',') : 'Consultar no site';
+                    const precoAnterior = item.price_before_discount > 0 
+                        ? (item.price_before_discount / 100000).toFixed(2).replace('.', ',') 
+                        : (!isNaN(numPreco) ? (numPreco * 1.25).toFixed(2).replace('.', ',') : 'Consultar no site');
 
-        if (precoFinal !== 'Consultar no site') {
-            const numPreco = parseFloat(precoFinal.replace('.', '').replace(',', '.'));
+                    return {
+                        nome: item.name || 'Produto em Oferta',
+                        preco: precoAtual,
+                        pa: precoAnterior,
+                        imagem: item.image ? `https://down-br.img.susercontent.com/file/${item.image}` : '',
+                        link: urlOriginal
+                    };
+                }
+            } catch (e) {
+                console.warn('API interna da Shopee bloqueada, usando parser HTML...');
+            }
+        }
+
+        // --- CAMADA C: PARSER HTML E JSON-LD DA PÁGINA ---
+        const $ = cheerio.load(html);
+
+        let nome = $('meta[property="og:title"]').attr('content') || 
+                   $('meta[name="twitter:title"]').attr('content') || 
+                   $('title').text() || 'Produto em Oferta';
+        
+        nome = nome.replace(/- Mercado Livre.*/i, '')
+                   .replace(/\| Shopee Brasil.*/i, '')
+                   .replace(/Compre.*na Shopee.*/i, '')
+                   .trim();
+
+        let imagem = $('meta[property="og:image"]').attr('content') || 
+                       $('meta[name="twitter:image"]').attr('content') || '';
+
+        let precoAtual = precoManual || '';
+        let precoAnterior = '';
+
+        // Varre os scripts JSON-LD incorporados na página
+        $('script[type="application/ld+json"]').each((_, el) => {
+            try {
+                const json = JSON.parse($(el).html() || '{}');
+                const items = Array.isArray(json) ? json : [json];
+                for (const item of items) {
+                    if (item.offers) {
+                        const offer = Array.isArray(item.offers) ? item.offers[0] : item.offers;
+                        if (offer && offer.price) {
+                            precoAtual = parseFloat(offer.price).toFixed(2).replace('.', ',');
+                        }
+                        if (offer && offer.highPrice) {
+                            precoAnterior = parseFloat(offer.highPrice).toFixed(2).replace('.', ',');
+                        }
+                    }
+                }
+            } catch (e) {}
+        });
+
+        // Caso ainda não tenha achado o preço no JSON, busca nas Meta Tags de produto
+        if (!precoAtual) {
+            const priceMeta = $('meta[property="product:price:amount"]').attr('content') || 
+                              $('meta[property="og:price:amount"]').attr('content') ||
+                              $('meta[name="twitter:data1"]').attr('content');
+
+            if (priceMeta) {
+                const match = priceMeta.match(/[\d.,]+/);
+                if (match) precoAtual = match[0].replace('.', ',');
+            }
+        }
+
+        // Se encontrou o preço atual mas não o anterior, gera a estimativa "De R$"
+        if (precoAtual && precoAtual !== 'Consultar no site' && !precoAnterior) {
+            const numPreco = parseFloat(precoAtual.replace('.', '').replace(',', '.'));
             if (!isNaN(numPreco) && numPreco > 0) {
-                precoAnteriorFinal = (numPreco * 1.25).toFixed(2).replace('.', ',');
+                precoAnterior = (numPreco * 1.25).toFixed(2).replace('.', ',');
             }
         }
 
         return {
-            nome: dadosPuppeteer?.nome || 'Produto em Oferta',
-            preco: precoFinal,
-            pa: precoAnteriorFinal,
-            imagem: dadosPuppeteer?.imagem || '',
+            nome: nome || 'Produto em Oferta',
+            preco: precoAtual || 'Consultar no site',
+            pa: precoAnterior || 'Consultar no site',
+            imagem,
             link: urlOriginal
         };
 
     } catch (error) {
-        console.error('Erro geral ao extrair dados:', error);
+        console.error('Erro na extração de dados:', error);
         return {
             nome: 'Produto em Oferta',
             preco: precoManual || 'Consultar no site',
@@ -270,7 +288,7 @@ bot.on('text', async (ctx) => {
     const precoInformado = partes[1] ? partes[1].trim() : undefined;
 
     if (url.startsWith('http://') || url.startsWith('https://')) {
-        await ctx.reply('🔍 *Abrindo o link no navegador para extrair preço e foto... Aguarde alguns segundos.*', { parse_mode: 'Markdown' });
+        await ctx.reply('🔍 *Lendo link do produto... Aguarde um instante.*', { parse_mode: 'Markdown' });
 
         const dados = await extrairDadosProduto(url, precoInformado);
         sessoesUsuario[ctx.from.id] = dados;
