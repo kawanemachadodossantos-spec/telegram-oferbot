@@ -32,8 +32,9 @@ function enviarMensagem () {
     const categoria = categorias[Math.floor( Math.random() * categorias.length )];
     const desconto = randomInt( 50, 80 );
     const cupom = gerarCupom();
-    const link = `https://shopee.com.br/flash_sale?categoryId=${categoria.id}`
-        .concat( '&utm_content=alfredo_bot&utm_medium=affiliates&utm_source=an_18395090622' );
+    
+    // Link de afiliado atualizado
+    const link = 'https://s.shopee.com.br/3qMGbbWn2G';
 
     const mensagem = gerarMensagem( categoria, desconto, cupom, link );
 
