@@ -1,11 +1,76 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import { bot } from '../lib/bot';
+import { bot, group_id } from '../lib/bot';
+import { getAssetPath, randomInt } from '../util/functions';
 
-// Variável para armazenar temporariamente os dados extraídos da URL recebida
+// ==========================================
+// 1. SISTEMA DE POSTAGEM AUTOMÁTICA (TELEGRAM)
+// ==========================================
+
+const categorias = [
+    { id: 18, nome: 'Computadores e Acessórios' },
+    { id: 28, nome: 'Moda Masculina' },
+    { id: 3, nome: 'Moda Feminina' },
+    { id: 35, nome: 'Mercado e Pets' },
+    { id: 20, nome: 'Casa e Cozinha' },
+    { id: 13, nome: 'Brinquedos' },
+    { id: 11, nome: 'Beleza e Cuidado Pessoal' },
+    { id: 5, nome: 'Eletrônicos' },
+    { id: 10, nome: 'Cuidados para o Bebê' },
+    { id: 4, nome: 'Livros e Papelaria' },
+    { id: 47, nome: 'Celulares e Dispositivos' },
+    { id: 9, nome: 'Auto e Moto' },
+    { id: 7, nome: 'Esportes e Lazer' },
+    { id: 2, nome: 'Ofertas Locais' },
+];
+
+function gerarMensagemAutomatica ( categoria: any, desconto: number, linkOferta: string, linkCupom: string ) {
+    const modelos = [
+        `🚀 *OFERTA RELÂMPAGO NA SHOPEE* 🚀\n\n💰 Até *${desconto}\\% OFF* em *${categoria.nome}*\n\n🔗 [👉 ACESSE AQUI 👈](${linkOferta})\n🎟️ CUPOM: [👉 RESGATE AQUI 👈](${linkCupom})\n⚠️ Corre antes que acabe\\!`,
+        `🔥 Olha só este baita desconto em *${categoria.nome}*\\! Até *${desconto}\\% OFF*\\.\n\n🔗 [👉 Dá uma olhada aqui 👈](${linkOferta})\n🎟️ Cupom: [👉 Pegue seu cupom aqui 👈](${linkCupom})\n⚠️ Não deixa passar, viu?`,
+        `🌟 Oferta especial\\! *${desconto}\\% OFF* em *${categoria.nome}*\\.\n\n🔗 [👉 Vem ver 👈](${linkOferta})\n🎟️ Usa o cupom: [👉 Resgatar Cupom 👈](${linkCupom})\n⚠️ É só por pouco tempo\\!`,
+    ];
+    return modelos[Math.floor( Math.random() * modelos.length )];
+}
+
+function enviarMensagemAutomatica () {
+    const categoria = categorias[Math.floor( Math.random() * categorias.length )];
+    const desconto = randomInt( 50, 80 );
+    
+    // Seus links de afiliado
+    const linkOferta = 'https://s.shopee.com.br/3qMGbbWn2G';
+    const linkCupom = 'https://s.shopee.com.br/30mGe2PWLQ';
+
+    const mensagem = gerarMensagemAutomatica( categoria, desconto, linkOferta, linkCupom );
+
+    const chanceComBanner = Math.random() < 0.6;
+
+    if ( chanceComBanner ) {
+        const caminhoBanner = getAssetPath( 'shopee_banner.jpg' );
+        bot.telegram.sendPhoto(
+            +group_id,
+            { source: caminhoBanner },
+            { caption: mensagem, parse_mode: 'MarkdownV2' }
+        )
+            .then( () => console.log( '✅ Oferta enviada com banner' ) )
+            .catch( err => console.error( '❌ Erro ao enviar oferta com banner:', err ) );
+    } else {
+        bot.telegram.sendMessage(
+            +group_id,
+            mensagem,
+            { parse_mode: 'MarkdownV2' }
+        )
+            .then( () => console.log( '✅ Oferta enviada sem banner' ) )
+            .catch( err => console.error( '❌ Erro ao enviar oferta sem banner:', err ) );
+    }
+}
+
+// ==========================================
+// 2. SISTEMA POR LINK PARA GERAR POST WHATSAPP
+// ==========================================
+
 const sessoesUsuario: { [key: number]: any } = {};
 
-// Função para extrair dados básicos do produto via Web Scraping
 async function extrairDadosProduto(url: string) {
     try {
         const response = await axios.get(url, {
@@ -16,13 +81,9 @@ async function extrairDadosProduto(url: string) {
 
         const $ = cheerio.load(response.data);
 
-        // Busca Título (Open Graph ou Tag Title)
         const nome = $('meta[property="og:title"]').attr('content') || $('title').text() || 'Produto Oferta';
-        
-        // Busca Imagem (Open Graph)
         const imagem = $('meta[property="og:image"]').attr('content') || '';
 
-        // Tenta encontrar preços na página (seletores genéricos para e-commerce)
         let precoAtual = 'Consultar no site';
         let precoAnterior = 'Consultar no site';
 
@@ -50,7 +111,6 @@ async function extrairDadosProduto(url: string) {
     }
 }
 
-// Formatos exatos para WhatsApp
 function gerarTextoShopee(nome: string, pa: string, preco: string, par: string, link: string) {
     return `🛍️ ${nome}
 
@@ -86,11 +146,10 @@ function gerarTextoML(nome: string, pa: string, preco: string, cupom: string, li
 ⚠️🚨 *ATENÇÃO: Valor promocional apenas utilizando o Cupom de Desconto*`;
 }
 
-// Escutador de mensagens com URLs no Telegram
+// Escutador de mensagens no Telegram
 bot.on('text', async (ctx) => {
     const texto = ctx.message.text;
 
-    // Verifica se a mensagem enviada contém um link
     if (texto.startsWith('http://') || texto.startsWith('https://')) {
         await ctx.reply('🔍 *Lendo link do produto... Aguarde um instante.*', { parse_mode: 'Markdown' });
 
@@ -172,6 +231,12 @@ bot.action('cancelar', async (ctx) => {
     await ctx.editMessageText('❌ *Operação cancelada.*', { parse_mode: 'Markdown' });
 });
 
-export function startOfertaJob() {
-    console.log('🤖 Bot pronto para receber links no chat do Telegram!');
+// Inicialização das tarefas agendadas
+export function startOfertaJob () {
+    const horas = 2;
+    const intervaloMs = horas * 60 * 60 * 1000;
+
+    enviarMensagemAutomatica();
+    setInterval( enviarMensagemAutomatica, intervaloMs );
+    console.log( '🔔 Job de ofertas e leitor de links iniciados...' );
 }
