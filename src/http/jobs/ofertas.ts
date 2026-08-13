@@ -71,89 +71,93 @@ function enviarMensagemAutomatica () {
 
 const sessoesUsuario: { [key: number]: any } = {};
 
-async function extrairDadosProduto(url: string) {
+async function extrairDadosProduto(urlOriginal: string, precoManual?: string) {
     try {
-        const response = await axios.get(url, {
+        const response = await axios.get(urlOriginal, {
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'pt-BR,pt;q=0.9'
             },
-            timeout: 10000
+            maxRedirects: 10,
+            timeout: 12000
         });
 
         const $ = cheerio.load(response.data);
 
-        // Limpeza do Nome do Produto
-        let nome = $('meta[property="og:title"]').attr('content') || $('title').text() || 'Produto Oferta';
-        nome = nome.replace('- Mercado Livre', '').replace('| Shopee Brasil', '').trim();
+        // 1. Nome
+        let nome = $('meta[property="og:title"]').attr('content') || 
+                   $('meta[name="twitter:title"]').attr('content') || 
+                   $('title').text() || 'Produto em Oferta';
+        
+        nome = nome.replace(/- Mercado Livre.*/i, '')
+                   .replace(/\| Shopee Brasil.*/i, '')
+                   .replace(/Compre.*na Shopee.*/i, '')
+                   .trim();
 
-        const imagem = $('meta[property="og:image"]').attr('content') || '';
+        // 2. Imagem (OpenGraph / Twitter / HTML ML)
+        let imagem = $('meta[property="og:image"]').attr('content') || 
+                       $('meta[name="twitter:image"]').attr('content') || 
+                       $('.ui-pdp-gallery__figure__image').first().attr('src') || '';
 
-        let precoAtual = '';
+        // 3. Preço
+        let precoAtual = precoManual || '';
         let precoAnterior = '';
 
-        // Busca por dados estruturados JSON-LD (usado no ML e Shopee)
-        $('script[type="application/ld+json"]').each((_, el) => {
-            try {
-                const json = JSON.parse($(el).html() || '{}');
-                const item = Array.isArray(json) ? json.find(i => i['@type'] === 'Product') : json;
-
-                if (item && (item['@type'] === 'Product' || item.offers)) {
-                    const offers = Array.isArray(item.offers) ? item.offers[0] : item.offers;
-                    if (offers && offers.price) {
-                        precoAtual = parseFloat(offers.price).toFixed(2).replace('.', ',');
-                    }
-                    if (offers && offers.highPrice) {
-                        precoAnterior = parseFloat(offers.highPrice).toFixed(2).replace('.', ',');
-                    }
-                }
-            } catch (e) {
-                // Ignora JSONs malformatados
-            }
-        });
-
-        // Caso fallback por seletores diretos de meta e HTML do Mercado Livre/Shopee
         if (!precoAtual) {
-            const priceMeta = $('meta[property="product:price:amount"]').attr('content') || $('meta[property="og:price:amount"]').attr('content') || $('meta[itemprop="price"]').attr('content');
+            const priceMeta = $('meta[property="product:price:amount"]').attr('content') || 
+                              $('meta[property="og:price:amount"]').attr('content') ||
+                              $('meta[name="twitter:data1"]').attr('content');
+
             if (priceMeta) {
-                precoAtual = parseFloat(priceMeta).toFixed(2).replace('.', ',');
-            } else {
-                const fraction = $('.ui-pdp-price__part--medium .andes-money-amount__fraction').first().text();
-                const cents = $('.ui-pdp-price__part--medium .andes-money-amount__cents').first().text() || '00';
-                if (fraction) {
-                    precoAtual = `${fraction},${cents}`;
-                }
+                const match = priceMeta.match(/[\d.,]+/);
+                if (match) precoAtual = match[0].replace('.', ',');
             }
         }
 
-        if (!precoAnterior) {
-            const originalFraction = $('.ui-pdp-price__original-value .andes-money-amount__fraction').first().text();
-            if (originalFraction) {
-                const originalCents = $('.ui-pdp-price__original-value .andes-money-amount__cents').first().text() || '00';
-                precoAnterior = `${originalFraction},${originalCents}`;
-            } else if (precoAtual && precoAtual !== 'Consultar no site') {
-                const val = parseFloat(precoAtual.replace('.', '').replace(',', '.'));
-                if (!isNaN(val)) {
-                    precoAnterior = (val * 1.25).toFixed(2).replace('.', ',');
-                }
+        if (!precoAtual) {
+            $('script[type="application/ld+json"]').each((_, el) => {
+                try {
+                    const json = JSON.parse($(el).html() || '{}');
+                    const items = Array.isArray(json) ? json : [json];
+                    for (const item of items) {
+                        if (item.offers) {
+                            const offer = Array.isArray(item.offers) ? item.offers[0] : item.offers;
+                            if (offer && offer.price) {
+                                precoAtual = parseFloat(offer.price).toFixed(2).replace('.', ',');
+                            }
+                            if (offer && offer.highPrice) {
+                                precoAnterior = parseFloat(offer.highPrice).toFixed(2).replace('.', ',');
+                            }
+                        }
+                    }
+                } catch (e) {}
+            });
+        }
+
+        if (precoAtual && !precoAnterior) {
+            const numPreco = parseFloat(precoAtual.replace('.', '').replace(',', '.'));
+            if (!isNaN(numPreco) && numPreco > 0) {
+                precoAnterior = (numPreco * 1.3).toFixed(2).replace('.', ',');
             }
         }
 
         return {
-            nome: nome.trim(),
+            nome: nome || 'Produto em Oferta',
             preco: precoAtual || 'Consultar no site',
             pa: precoAnterior || 'Consultar no site',
             imagem,
-            link: url
+            link: urlOriginal
         };
+
     } catch (error) {
         console.error('Erro ao extrair dados do link:', error);
         return {
             nome: 'Produto em Oferta',
-            preco: 'Confira no site',
-            pa: 'Confira no site',
+            preco: precoManual || 'Consultar no site',
+            pa: 'Consultar no site',
             imagem: '',
-            link: url
+            link: urlOriginal
         };
     }
 }
@@ -195,12 +199,16 @@ function gerarTextoML(nome: string, pa: string, preco: string, cupom: string, li
 
 // Escutador de mensagens no Telegram
 bot.on('text', async (ctx) => {
-    const texto = ctx.message.text;
+    const texto = ctx.message.text.trim();
 
-    if (texto.startsWith('http://') || texto.startsWith('https://')) {
+    const partes = texto.split('|');
+    const url = partes[0].trim();
+    const precoInformado = partes[1] ? partes[1].trim() : undefined;
+
+    if (url.startsWith('http://') || url.startsWith('https://')) {
         await ctx.reply('🔍 *Lendo link do produto... Aguarde um instante.*', { parse_mode: 'Markdown' });
 
-        const dados = await extrairDadosProduto(texto);
+        const dados = await extrairDadosProduto(url, precoInformado);
         sessoesUsuario[ctx.from.id] = dados;
 
         const mensagemPreview = `📦 *PRODUTO ENCONTRADO*\n\n📌 *Nome:* ${dados.nome}\n💰 *Preço:* R$ ${dados.preco}\n\nEscolha abaixo em qual formato deseja gerar o post para o WhatsApp:`;
@@ -236,7 +244,7 @@ bot.on('text', async (ctx) => {
     }
 });
 
-// Ações dos botões Inline
+// Ações dos botões Inline (Agora enviando com a FOTO e a LEGENDA)
 bot.action('gerar_shopee', async (ctx) => {
     const dados = sessoesUsuario[ctx.from?.id || 0];
     if (!dados) {
@@ -252,7 +260,14 @@ bot.action('gerar_shopee', async (ctx) => {
     );
 
     await ctx.answerCbQuery('Texto Shopee Gerado!');
-    await ctx.reply(`📱 *TEXTO SHOPEE PRONTO PARA O WHATSAPP:*\n\n\`\`\`\n${textoFormatado}\n\`\`\``, { parse_mode: 'Markdown' });
+
+    if (dados.imagem) {
+        await ctx.replyWithPhoto(dados.imagem, {
+            caption: textoFormatado
+        });
+    } else {
+        await ctx.reply(`📱 *TEXTO SHOPEE PRONTO PARA O WHATSAPP:*\n\n\`\`\`\n${textoFormatado}\n\`\`\``, { parse_mode: 'Markdown' });
+    }
 });
 
 bot.action('gerar_ml', async (ctx) => {
@@ -270,7 +285,14 @@ bot.action('gerar_ml', async (ctx) => {
     );
 
     await ctx.answerCbQuery('Texto Mercado Livre Gerado!');
-    await ctx.reply(`📱 *TEXTO MERCADO LIVRE PRONTO PARA O WHATSAPP:*\n\n\`\`\`\n${textoFormatado}\n\`\`\``, { parse_mode: 'Markdown' });
+
+    if (dados.imagem) {
+        await ctx.replyWithPhoto(dados.imagem, {
+            caption: textoFormatado
+        });
+    } else {
+        await ctx.reply(`📱 *TEXTO MERCADO LIVRE PRONTO PARA O WHATSAPP:*\n\n\`\`\`\n${textoFormatado}\n\`\`\``, { parse_mode: 'Markdown' });
+    }
 });
 
 bot.action('cancelar', async (ctx) => {
