@@ -75,27 +75,74 @@ async function extrairDadosProduto(url: string) {
     try {
         const response = await axios.get(url, {
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
-            }
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+            },
+            timeout: 10000
         });
 
         const $ = cheerio.load(response.data);
 
-        const nome = $('meta[property="og:title"]').attr('content') || $('title').text() || 'Produto Oferta';
+        // Limpeza do Nome do Produto
+        let nome = $('meta[property="og:title"]').attr('content') || $('title').text() || 'Produto Oferta';
+        nome = nome.replace('- Mercado Livre', '').replace('| Shopee Brasil', '').trim();
+
         const imagem = $('meta[property="og:image"]').attr('content') || '';
 
-        let precoAtual = 'Consultar no site';
-        let precoAnterior = 'Consultar no site';
+        let precoAtual = '';
+        let precoAnterior = '';
 
-        const priceMeta = $('meta[property="product:price:amount"]').attr('content') || $('meta[property="og:price:amount"]').attr('content');
-        if (priceMeta) {
-            precoAtual = parseFloat(priceMeta).toFixed(2).replace('.', ',');
+        // Busca por dados estruturados JSON-LD (usado no ML e Shopee)
+        $('script[type="application/ld+json"]').each((_, el) => {
+            try {
+                const json = JSON.parse($(el).html() || '{}');
+                const item = Array.isArray(json) ? json.find(i => i['@type'] === 'Product') : json;
+
+                if (item && (item['@type'] === 'Product' || item.offers)) {
+                    const offers = Array.isArray(item.offers) ? item.offers[0] : item.offers;
+                    if (offers && offers.price) {
+                        precoAtual = parseFloat(offers.price).toFixed(2).replace('.', ',');
+                    }
+                    if (offers && offers.highPrice) {
+                        precoAnterior = parseFloat(offers.highPrice).toFixed(2).replace('.', ',');
+                    }
+                }
+            } catch (e) {
+                // Ignora JSONs malformatados
+            }
+        });
+
+        // Caso fallback por seletores diretos de meta e HTML do Mercado Livre/Shopee
+        if (!precoAtual) {
+            const priceMeta = $('meta[property="product:price:amount"]').attr('content') || $('meta[property="og:price:amount"]').attr('content') || $('meta[itemprop="price"]').attr('content');
+            if (priceMeta) {
+                precoAtual = parseFloat(priceMeta).toFixed(2).replace('.', ',');
+            } else {
+                const fraction = $('.ui-pdp-price__part--medium .andes-money-amount__fraction').first().text();
+                const cents = $('.ui-pdp-price__part--medium .andes-money-amount__cents').first().text() || '00';
+                if (fraction) {
+                    precoAtual = `${fraction},${cents}`;
+                }
+            }
+        }
+
+        if (!precoAnterior) {
+            const originalFraction = $('.ui-pdp-price__original-value .andes-money-amount__fraction').first().text();
+            if (originalFraction) {
+                const originalCents = $('.ui-pdp-price__original-value .andes-money-amount__cents').first().text() || '00';
+                precoAnterior = `${originalFraction},${originalCents}`;
+            } else if (precoAtual && precoAtual !== 'Consultar no site') {
+                const val = parseFloat(precoAtual.replace('.', '').replace(',', '.'));
+                if (!isNaN(val)) {
+                    precoAnterior = (val * 1.25).toFixed(2).replace('.', ',');
+                }
+            }
         }
 
         return {
             nome: nome.trim(),
-            preco: precoAtual,
-            pa: precoAnterior,
+            preco: precoAtual || 'Consultar no site',
+            pa: precoAnterior || 'Consultar no site',
             imagem,
             link: url
         };
