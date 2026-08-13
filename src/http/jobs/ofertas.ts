@@ -1,5 +1,6 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
+import { GraphQLClient, gql } from 'graphql-request';
 import { bot, group_id } from '../lib/bot';
 import { getAssetPath, randomInt } from '../util/functions';
 
@@ -37,12 +38,10 @@ function enviarMensagemAutomatica () {
     const categoria = categorias[Math.floor( Math.random() * categorias.length )];
     const desconto = randomInt( 50, 80 );
     
-    // Seus links de afiliado
     const linkOferta = 'https://s.shopee.com.br/3qMGbbWn2G';
     const linkCupom = 'https://s.shopee.com.br/30mGe2PWLQ';
 
     const mensagem = gerarMensagemAutomatica( categoria, desconto, linkOferta, linkCupom );
-
     const chanceComBanner = Math.random() < 0.6;
 
     if ( chanceComBanner ) {
@@ -66,13 +65,97 @@ function enviarMensagemAutomatica () {
 }
 
 // ==========================================
-// 2. SISTEMA POR LINK PARA GERAR POST WHATSAPP
+// 2. EXTRAÇÃO DE DADOS (OPEN SOURCE / SCRAPING)
 // ==========================================
 
 const sessoesUsuario: { [key: number]: any } = {};
 
+async function consultarShopeeGraphQLAberto(itemid: string, shopid: string) {
+    try {
+        const client = new GraphQLClient('https://shopee.com.br/api/v4/item/get', {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            }
+        });
+
+        // Requisição para dados abertos de produtos
+        const res: any = await axios.get(`https://shopee.com.br/api/v4/item/get?itemid=${itemid}&shopid=${shopid}`);
+        if (res.data && res.data.data) {
+            const item = res.data.data;
+            const preco = (item.price / 100000).toFixed(2).replace('.', ',');
+            const precoAntes = item.price_before_discount > 0 
+                ? (item.price_before_discount / 100000).toFixed(2).replace('.', ',') 
+                : ((item.price / 100000) * 1.25).toFixed(2).replace('.', ',');
+
+            return {
+                nome: item.name,
+                preco,
+                pa: precoAntes,
+                imagem: `https://down-br.img.susercontent.com/file/${item.image}`,
+            };
+        }
+    } catch (e) {
+        console.warn('Consulta GraphQL direta indisponível, usando fallback HTML...');
+    }
+    return null;
+}
+
 async function extrairDadosProduto(urlOriginal: string, precoManual?: string) {
     try {
+        // --- A. MERCADO LIVRE ---
+        const mlMatch = urlOriginal.match(/MLB-?(\d+)/i);
+        if (mlMatch) {
+            const itemId = `MLB${mlMatch[1]}`;
+            try {
+                const apiRes = await axios.get(`https://api.mercadolibre.com/items/${itemId}`, { timeout: 8000 });
+                if (apiRes.data) {
+                    const item = apiRes.data;
+                    const nome = item.title || 'Produto em Oferta';
+                    const precoNum = precoManual ? parseFloat(precoManual.replace(',', '.')) : item.price;
+                    const precoAtual = precoNum ? precoNum.toFixed(2).replace('.', ',') : 'Consultar no site';
+                    
+                    let precoAnterior = '';
+                    if (item.original_price && item.original_price > item.price) {
+                        precoAnterior = item.original_price.toFixed(2).replace('.', ',');
+                    } else if (precoNum) {
+                        precoAnterior = (precoNum * 1.25).toFixed(2).replace('.', ',');
+                    } else {
+                        precoAnterior = 'Consultar no site';
+                    }
+
+                    const imagem = item.pictures && item.pictures.length > 0 
+                        ? item.pictures[0].secure_url || item.pictures[0].url 
+                        : (item.thumbnail ? item.thumbnail.replace('-I.jpg', '-O.jpg') : '');
+
+                    return {
+                        nome,
+                        preco: precoAtual,
+                        pa: precoAnterior,
+                        imagem,
+                        link: urlOriginal
+                    };
+                }
+            } catch (err) {
+                console.warn('Erro ao consultar API do ML, tentando via leitura HTML...', err);
+            }
+        }
+
+        // --- B. SHOPEE (TENTA VIA GRAPHQL / ENDPOINT ABERTO) ---
+        const shopeeIds = urlOriginal.match(/i\.(\d+)\.(\d+)/);
+        if (shopeeIds) {
+            const shopid = shopeeIds[1];
+            const itemid = shopeeIds[2];
+            const dadosAbertos = await consultarShopeeGraphQLAberto(itemid, shopid);
+            if (dadosAbertos) {
+                return {
+                    ...dadosAbertos,
+                    preco: precoManual || dadosAbertos.preco,
+                    link: urlOriginal
+                };
+            }
+        }
+
+        // --- C. FALLBACK VIA REDIRECIONAMENTO E SCRAPING HTML ---
         const response = await axios.get(urlOriginal, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
@@ -85,7 +168,6 @@ async function extrairDadosProduto(urlOriginal: string, precoManual?: string) {
 
         const $ = cheerio.load(response.data);
 
-        // 1. Nome
         let nome = $('meta[property="og:title"]').attr('content') || 
                    $('meta[name="twitter:title"]').attr('content') || 
                    $('title').text() || 'Produto em Oferta';
@@ -95,12 +177,10 @@ async function extrairDadosProduto(urlOriginal: string, precoManual?: string) {
                    .replace(/Compre.*na Shopee.*/i, '')
                    .trim();
 
-        // 2. Imagem (OpenGraph / Twitter / HTML ML)
         let imagem = $('meta[property="og:image"]').attr('content') || 
                        $('meta[name="twitter:image"]').attr('content') || 
                        $('.ui-pdp-gallery__figure__image').first().attr('src') || '';
 
-        // 3. Preço
         let precoAtual = precoManual || '';
         let precoAnterior = '';
 
@@ -135,10 +215,10 @@ async function extrairDadosProduto(urlOriginal: string, precoManual?: string) {
             });
         }
 
-        if (precoAtual && !precoAnterior) {
+        if (precoAtual && precoAtual !== 'Consultar no site' && !precoAnterior) {
             const numPreco = parseFloat(precoAtual.replace('.', '').replace(',', '.'));
             if (!isNaN(numPreco) && numPreco > 0) {
-                precoAnterior = (numPreco * 1.3).toFixed(2).replace('.', ',');
+                precoAnterior = (numPreco * 1.25).toFixed(2).replace('.', ',');
             }
         }
 
@@ -197,7 +277,10 @@ function gerarTextoML(nome: string, pa: string, preco: string, cupom: string, li
 ⚠️🚨 *ATENÇÃO: Valor promocional apenas utilizando o Cupom de Desconto*`;
 }
 
-// Escutador de mensagens no Telegram
+// ==========================================
+// 3. LISTENERS DO TELEGRAM BOT
+// ==========================================
+
 bot.on('text', async (ctx) => {
     const texto = ctx.message.text.trim();
 
@@ -244,7 +327,6 @@ bot.on('text', async (ctx) => {
     }
 });
 
-// Ações dos botões Inline (Agora enviando com a FOTO e a LEGENDA)
 bot.action('gerar_shopee', async (ctx) => {
     const dados = sessoesUsuario[ctx.from?.id || 0];
     if (!dados) {
@@ -300,7 +382,6 @@ bot.action('cancelar', async (ctx) => {
     await ctx.editMessageText('❌ *Operação cancelada.*', { parse_mode: 'Markdown' });
 });
 
-// Inicialização das tarefas agendadas
 export function startOfertaJob () {
     const horas = 2;
     const intervaloMs = horas * 60 * 60 * 1000;
