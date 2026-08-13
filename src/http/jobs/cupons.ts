@@ -27,7 +27,9 @@ async function enviarCupomAleatorio () {
 
     const arquivoSorteado = escolherAleatorio( arquivos );
     const { valor1, valor2 } = parsearNomeArquivo( arquivoSorteado );
-    const link = 'https://s.shopee.com.br/3VYh7avafi';
+    
+    // Link de afiliado atualizado
+    const link = 'https://s.shopee.com.br/30mGe2PWLQ';
 
     const legenda = `
 ⚠️ *\\+CUPOM LIBERADO*
